@@ -14,7 +14,7 @@
 
 ; location in memory that begins in memory offset zero and goes all the way to memory offset FF
 .segment "ZEROPAGE"
-world: .res 2 ; reserve 2 bytes in zeropage for world variable
+background: .res 2 ; reserve 2 bytes in zeropage for background pointer variable
 
 ; where your code starts, defines where to define your code, and where your code lives in this file
 .segment "STARTUP"
@@ -40,12 +40,12 @@ Reset: ; reset handler
 	STX $4010
 
 :
-	; address 2002 vblank register, tells us if the PPU is currently drawing the screen
+	; address $2002; PPUSTATUS, tells us if the PPU is currently drawing the screen
 	; the BIT op-code tells us the value of bit 7 of $2002's returned byte if bit number
 	; 7 is set to zero we are not currently waiting to draw the next screen if bit number 7
-	; is one we have reached the period where we have drawn a full screen
+	; is one we have reached the period where we have drawn a full screen and we will continue on in the program
 	BIT $2002
-	; jump back to prev annonomous label if bit number 7 is set to zero
+	; jump back to prev annonomous label if bit number 7 is set to zero (until the PPU is fully initialized, this takes around 30,000 CPU cycles)
 	BPL :- 
 
 	TXA ; transfer x register to a register
@@ -78,62 +78,65 @@ CLEARMEM:
 	BPL :- 
 
 	; this will be used to tell the PPU what range of memory the most signifigant byte starting with $02
-	LDA #$02 ; load A with the value of 2
+	LDA #$02 ; load A with the value of $02 (address of our oam)
 	STA $4014 ; OAMDMA register 
 	NOP ; No Operation Burn a cycle, the PPU needs a moment to initiate a memory transfer from the range $0200 into its own memory
 
 	LDA #$3F
-	STA $2006 ; loading this value in the PPU tells the PPU that we want to start off writing data at a memory address
+	STA $2006 ; loading these values into the PPUADDR ($2006) tells the PPU that any following writes to PPUDATA ($2007) will be at $3F00
 	LDA #$00
-	STA $2006 ; the PPU now finds out we want to write to $3F00 (pallete data of the PPU)
+	STA $2006 ; the PPU now finds out we want to write to $3F00 which is the address of the first color of the first palette
 
 	LDX #$00
 
+; we will now write the palette data itself to the selected PPU memory address, write one byte of the data each incrementation
 LoadPalettes:
 	LDA PaletteData, X ; load A with address of PaletteData + X
+	; address $2007 is the address of PPUDATA, we set the address of PPUDATA to $3F00 earlier buy setting PPUADDR($2006) to $3F00
 	STA $2007 ; $3F00, %3F01, $3F02 ... $3F1F once we get to 3F1F it means we have updated all 32 bytes of memory for the pallete
 	INX
 	CPX #$20 ; compare X to $20
-	BNE LoadPalettes
+	BNE LoadPalettes ; loop until we have stored all palette data inside 2007
 
-	; Initialize world to point to world data
-	LDA #<WorldData ; Load a with the value of the low byte of WorldData ( '<' gets the low byte of a label)
-	STA world		; Store value of A in the world variable (occupy low byte of world)
-	LDA #>WorldData ; Load a with the value of the high byte of WorldData
-	STA world+1		; Store the high byte of WorldData in our world variable 
+; Initialize world to point to world data
+LDA #<BackgroundData ; Load a with the value of the low byte of WorldData ( '<' gets the low byte of a label)
+STA background		; Store value of A in the world variable (occupy low byte of world)
+LDA #>BackgroundData ; Load a with the value of the high byte of WorldData
+STA background+1		; Store the high byte of WorldData in our world variable 
 	                ; ( the +1 means store it to the address that world refrences but add one to the address; populate second byte of variable)
-	; World now store an address to WorldData
+; World now store an address to WorldData
 
-	; setup address in PPU for nametable data
-	BIT $2002	; read from 2002, this resets PPU to know the next value you write to 2006 is the first byte of the address (BIT is fast that is why its used)
-	LDA #$20	; load high byte
-	STA $2006
-	LDA #$00	; load low byte
-	STA $2006
+; setup address in PPU for nametable data
+BIT $2002	; read from 2002, this resets PPU to know the next value you write to 2006 is the first byte of the address (BIT is fast that is why its used)
+LDA #$20	; load high byte
+STA $2006
+LDA #$00	; load low byte
+STA $2006	; set the PPUDATA to point to the address $2000
 
-	LDX #$00
-	LDY #$00
+LDX #$00
+LDY #$00
 
-LoadWorld:
+; we will now load the background into PPUDATA ($2000) one byte at a time
+LoadBackground:
 	; We have to loop until 960 (until whole background is loaded) so we will use 16-bit math
 	; 960 in Hex is 03C0 so we need the X register to have a value of 03 and the Y register have a value of C0
-	LDA (world), Y ; load a with world address + y
+	LDA (background), Y ; load a with world address + y
 	STA $2007	   ; store in PPU memory
 	INY
 	CPX #$03
 	BNE :+		   ; if x is not equal we do not have ot check Y so we branch (branch to unamed label ahead)
 	CPY #$C0
-	BEQ DoneLoadingWorld ; if X and Y have hit 960 (03C0) we are dont loading the world
+	BEQ DoneLoadingBackground ; if X and Y have hit 960 (03C0) we are dont loading the world
 
 : 
 	CPY #$00	   ; if Y has rolled over (255 + 1 = 0)
-	BNE LoadWorld
+	BNE LoadBackground
 	INX			   ; keep track how many elements we have interated over (or how much times Y has rolled over)
-	INC world+1	   ; get to next chunk of data we want to load into PPU high byte
+	INC background+1	   ; get to next chunk of data we want to load into PPU high byte
 
-	JMP LoadWorld
+	JMP LoadBackground
 
-DoneLoadingWorld:
+DoneLoadingBackground:
 	LDX #$00
 
 SetAttributes:
@@ -151,19 +154,24 @@ LoadSprites:
 	STA $0200, X ; store the sprite data into the memory we have mentioned earlier we will use for it
 	INX
 	CPX #$20
-	BNE LoadSprites
-
+	BNE LoadSprites 
+ 
 ; Enable Interupts
-	CLI ; Clear Interupt
+CLI ; Clear Interupt
 
-	; Bit 7 tells the PPU we want to be interupted when the VBlank is occuring through the NMI, so when and interupt occurs the CPU will bring us to NMI
-	; change background to use second chr set of tiles ($1000)
-	LDA #%10010000
-	STA $2000
-	; Enabling sprites and background for left-most 8 pixels
-	; Enabling sprites and background
-	LDA #%00011110
-	STA $2001
+; Bit 7 tells the PPU we want to be interupted when the VBlank is occuring through the NMI, so when and interupt occurs the CPU will bring us to NMI
+; change background to use second chr set of tiles ($1000)
+LDA #%10010000
+STA $2000
+; Enabling sprites and background for left-most 8 pixels
+; Enabling sprites and background
+LDA #%00011110
+STA $2001
+
+LDA #$12
+STA $0200
+
+LDA #$0
 
 Loop:  ; loop forever
 	JMP Loop
@@ -177,11 +185,10 @@ PaletteData:
   .byte $22,$29,$1A,$0F,$22,$36,$17,$0f,$22,$30,$21,$0f,$22,$27,$17,$0F  ; background palette data
   .byte $22,$16,$27,$18,$22,$1A,$30,$27,$22,$16,$30,$27,$22,$0F,$36,$17  ; sprite palette data
 
-WorldData:
+BackgroundData:
 	.incbin "world.bin"
 
-SpriteData:
-   ; positions of each tile of our sprite
+SpriteData: ; OAM, Object Attribute Memory
    ; Y Offset, SpriteNum, Palette (here we use first palette), X Offset
   .byte $08, $00, $00, $08
   .byte $08, $01, $00, $10
@@ -198,7 +205,6 @@ SpriteData:
 	.word NMI	; define Non Maskable Interupt time between image on the screen and being refreshed again by electron gun
 	.word Reset ; what happens when someone press's the reset button
 	
-
 ; where we tell the assembler where to find the graphical data
 .segment "CHARS"
 	.incbin "hellomario.chr"
